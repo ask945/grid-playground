@@ -8,26 +8,23 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
+// Middleware
 app.use(cors());
 app.use(express.json());
 
+// Configuration
 const PORT = process.env.PORT || 8080;
 const GRID_SIZE = 400; // 20x20 = 400 cells
 const GRID_COLS = 20;
 
-const COLORS = [
-  '#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8',
-  '#F7DC6F', '#BB8FCE', '#85C1E2', '#F8B739', '#52B788',
-  '#F72585', '#7209B7', '#3A0CA3', '#4361EE', '#4CC9F0',
-  '#06FFA5', '#FF006E', '#8338EC', '#FFBE0B', '#FB5607'
-];
-
+// State management
 const state = {
   grid: [],
-  users: new Map(),
-  usedColors: new Set()
+  users: new Map(), // userId -> { color, connectedAt, ws }
+  usedColors: new Set() // Track colors to prevent duplicates
 };
 
+// Initialize grid
 function initializeGrid() {
   state.grid = Array.from({ length: GRID_SIZE }, (_, i) => ({
     id: i,
@@ -35,26 +32,41 @@ function initializeGrid() {
     color: null,
     updatedAt: null
   }));
-  console.log(`Grid initialized with ${GRID_SIZE} cells`);
+  console.log(`✅ Grid initialized with ${GRID_SIZE} cells`);
 }
 
+// Generate unique, visually appealing colors using HSL
+// This ensures unlimited colors with good contrast and vibrancy
+function generateNiceColor() {
+  let color;
+  let attempts = 0;
+  const maxAttempts = 50;
+  
+  // Try to generate a unique color
+  do {
+    const hue = Math.floor(Math.random() * 360); // 0-360 degrees
+    const saturation = 65 + Math.floor(Math.random() * 25); // 65-90% (vibrant)
+    const lightness = 45 + Math.floor(Math.random() * 20); // 45-65% (not too dark/light)
+    color = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+    attempts++;
+  } while (state.usedColors.has(color) && attempts < maxAttempts);
+  
+  return color;
+}
+
+// Get random color for new user
 function getRandomColor() {
-  const availableColors = COLORS.filter(c => !state.usedColors.has(c));
-  
-  if (availableColors.length === 0) {
-    state.usedColors.clear();
-    return COLORS[Math.floor(Math.random() * COLORS.length)];
-  }
-  
-  const color = availableColors[Math.floor(Math.random() * availableColors.length)];
+  const color = generateNiceColor();
   state.usedColors.add(color);
   return color;
 }
 
+// Generate unique user ID
 function generateUserId() {
   return `u_${uuidv4().substring(0, 8)}`;
 }
 
+// Broadcast to all connected clients
 function broadcast(message, excludeWs = null) {
   const data = JSON.stringify(message);
   
@@ -65,17 +77,21 @@ function broadcast(message, excludeWs = null) {
   });
 }
 
+// Send message to specific client
 function sendToClient(ws, message) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(message));
   }
 }
 
+// Get connected users count
 function getConnectedUsersCount() {
   return state.users.size;
 }
 
+// Handle cell claim
 function handleClaimCell(userId, cellId, ws) {
+  // Validate cellId
   if (cellId < 0 || cellId >= GRID_SIZE) {
     sendToClient(ws, {
       type: 'error',
@@ -95,14 +111,30 @@ function handleClaimCell(userId, cellId, ws) {
     return;
   }
 
+  // Check if cell is already owned by this user
   if (cell.ownerId === userId) {
-    return; 
+    return; // Already owned, do nothing
   }
 
+  // IMPROVED: Reject if cell is already claimed by someone else
+  // This prevents race conditions and makes ownership clear
+  if (cell.ownerId !== null && cell.ownerId !== userId) {
+    sendToClient(ws, {
+      type: 'claim_rejected',
+      cellId: cellId,
+      reason: 'already_claimed',
+      message: 'Cell already claimed by another user'
+    });
+    console.log(`❌ Cell ${cellId} claim rejected for ${userId} (owned by ${cell.ownerId})`);
+    return;
+  }
+
+  // Update cell ownership
   cell.ownerId = userId;
   cell.color = user.color;
   cell.updatedAt = Date.now();
 
+  // Broadcast update to all clients
   broadcast({
     type: 'cell_updated',
     cellId: cell.id,
@@ -111,9 +143,10 @@ function handleClaimCell(userId, cellId, ws) {
     updatedAt: cell.updatedAt
   });
 
-  console.log(`Cell ${cellId} claimed by ${userId}`);
+  console.log(`📍 Cell ${cellId} claimed by ${userId}`);
 }
 
+// Handle user disconnection
 function handleDisconnect(userId) {
   const user = state.users.get(userId);
   
@@ -121,8 +154,9 @@ function handleDisconnect(userId) {
     state.usedColors.delete(user.color);
     state.users.delete(userId);
     
-    console.log(`User ${userId} disconnected`);
+    console.log(`👋 User ${userId} disconnected`);
     
+    // Broadcast updated user count
     broadcast({
       type: 'users_count',
       count: getConnectedUsersCount()
@@ -130,18 +164,21 @@ function handleDisconnect(userId) {
   }
 }
 
+// WebSocket connection handler
 wss.on('connection', (ws) => {
   const userId = generateUserId();
   const userColor = getRandomColor();
-
+  
+  // Store user
   state.users.set(userId, {
     color: userColor,
     connectedAt: Date.now(),
     ws: ws
   });
 
-  console.log(`New connection: ${userId} (${getConnectedUsersCount()} total)`);
+  console.log(`🔗 New connection: ${userId} (${getConnectedUsersCount()} total)`);
 
+  // Send initial state to the new user
   sendToClient(ws, {
     type: 'init_state',
     you: {
@@ -152,18 +189,21 @@ wss.on('connection', (ws) => {
     connectedUsers: getConnectedUsersCount()
   });
 
+  // Broadcast updated user count to all others
   broadcast({
     type: 'users_count',
     count: getConnectedUsersCount()
   }, ws);
 
+  // Handle incoming messages
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
 
       switch (data.type) {
         case 'join':
-          console.log(`User ${userId} joined`);
+          // Join is implicit on connection, but we can log it
+          console.log(`✋ User ${userId} joined`);
           break;
 
         case 'claim_cell':
@@ -171,10 +211,10 @@ wss.on('connection', (ws) => {
           break;
 
         default:
-          console.log(`Unknown message type: ${data.type}`);
+          console.log(`⚠️  Unknown message type: ${data.type}`);
       }
     } catch (error) {
-      console.error('Error parsing message:', error);
+      console.error('❌ Error parsing message:', error);
       sendToClient(ws, {
         type: 'error',
         message: 'Invalid message format'
@@ -182,15 +222,18 @@ wss.on('connection', (ws) => {
     }
   });
 
+  // Handle disconnection
   ws.on('close', () => {
     handleDisconnect(userId);
   });
 
+  // Handle errors
   ws.on('error', (error) => {
-    console.error(`WebSocket error for ${userId}:`, error);
+    console.error(`❌ WebSocket error for ${userId}:`, error);
   });
 });
 
+// REST API endpoints (optional, for debugging/monitoring)
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'healthy',
@@ -221,10 +264,17 @@ app.get('/api/grid', (req, res) => {
   });
 });
 
+// Root endpoint
 app.get('/', (req, res) => {
   res.json({
     message: 'Pixel Board WebSocket Server',
-    version: '1.0.0',
+    version: '2.0.0',
+    features: {
+      colorSystem: 'HSL (unlimited unique colors)',
+      conflictResolution: 'First-come-first-served',
+      gridSize: `${GRID_COLS}x${GRID_COLS}`,
+      totalCells: GRID_SIZE
+    },
     endpoints: {
       websocket: 'ws://localhost:' + PORT,
       health: '/api/health',
@@ -234,17 +284,18 @@ app.get('/', (req, res) => {
   });
 });
 
+// Initialize and start server
 initializeGrid();
 
 server.listen(PORT, () => {
   console.log(`🌐 HTTP Server: http://localhost:${PORT}`);
   console.log(`🔌 WebSocket: ws://localhost:${PORT}`);
   console.log(`📊 Grid Size: ${GRID_COLS}x${GRID_COLS} (${GRID_SIZE} cells)`);
-  console.log(`🎨 Available Colors: ${COLORS.length}`);
 });
 
+// Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
+  console.log('📴 SIGTERM signal received: closing HTTP server');
   server.close(() => {
     console.log('✅ HTTP server closed');
     process.exit(0);
@@ -252,9 +303,9 @@ process.on('SIGTERM', () => {
 });
 
 process.on('SIGINT', () => {
-  console.log('\n SIGINT signal received: closing HTTP server');
+  console.log('\n📴 SIGINT signal received: closing HTTP server');
   server.close(() => {
-    console.log('HTTP server closed');
+    console.log('✅ HTTP server closed');
     process.exit(0);
   });
 });
