@@ -135,7 +135,7 @@ function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>🎨 Pixel Board</h1>
+        <h1>Grid Rush</h1>
         <div className="user-info">
           <div className="user-color" style={{ backgroundColor: currentUser.color }}></div>
           <span>You: {currentUser.userId}</span>
