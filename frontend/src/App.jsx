@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import './App.css';
 
-const GRID_SIZE = 400; // 20x20 grid = 400 cells
+const GRID_SIZE = 400;
 const GRID_COLS = 20;
 const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8080';
 
@@ -13,24 +13,29 @@ function App() {
   const [hoveredCell, setHoveredCell] = useState(null);
   const wsRef = useRef(null);
 
-  // WebSocket connection
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
+    let isMounted = true;
 
     ws.onopen = () => {
+      if (!isMounted) {
+        ws.close();
+        return;
+      }
+      
       console.log('Connected to server');
       setIsConnected(true);
-      // Send join event
       ws.send(JSON.stringify({ type: 'join' }));
     };
 
     ws.onmessage = (event) => {
+      if (!isMounted) return;
+      
       const data = JSON.parse(event.data);
       
       switch (data.type) {
         case 'init_state':
-          // Initialize user info and grid
           setCurrentUser(data.you);
           setGrid(data.grid);
           if (data.connectedUsers) {
@@ -39,7 +44,6 @@ function App() {
           break;
 
         case 'cell_updated':
-          // Update specific cell
           setGrid(prevGrid => {
             const newGrid = [...prevGrid];
             const cell = newGrid.find(c => c.id === data.cellId);
@@ -53,9 +57,7 @@ function App() {
           break;
 
         case 'claim_rejected':
-          // Cell claim was rejected (already owned by someone else)
           console.log(`Claim rejected for cell ${data.cellId}: ${data.reason}`);
-          // Visual feedback could be added here (e.g., shake animation)
           break;
 
         case 'users_count':
@@ -72,30 +74,27 @@ function App() {
     };
 
     ws.onclose = () => {
+      if (!isMounted) return;
       console.log('Disconnected from server');
       setIsConnected(false);
     };
 
-    // Cleanup on unmount
     return () => {
-      if (ws.readyState === WebSocket.OPEN) {
+      isMounted = false;
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close();
       }
     };
   }, []);
 
-  // Handle cell click
   const handleCellClick = useCallback((cellId) => {
     if (!isConnected || !wsRef.current) return;
-
-    // Send claim request
     wsRef.current.send(JSON.stringify({
       type: 'claim_cell',
       cellId: cellId
     }));
   }, [isConnected]);
 
-  // Get cell color
   const getCellColor = (cell) => {
     if (hoveredCell === cell.id && !cell.ownerId) {
       return currentUser?.color || '#ddd';
@@ -103,7 +102,6 @@ function App() {
     return cell.color || '#f5f5f5';
   };
 
-  // Get cell class
   const getCellClass = (cell) => {
     const classes = ['cell'];
     if (cell.ownerId === currentUser?.userId) {
@@ -173,6 +171,7 @@ function App() {
 
       <div className="instructions">
         <p>Click any block to claim it! 🎯</p>
+        <p className="hint">Changes appear in real-time for all users</p>
       </div>
     </div>
   );
